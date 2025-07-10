@@ -26,6 +26,13 @@ type Config struct {
 	HTTPTimeout      time.Duration
 	MaxRetries       int
 	RetryBackoffBase time.Duration
+
+	// Профилирование
+	ProfileEnable   bool
+	ProfileHTTPPort int
+	ProfileCPUFile  string
+	ProfileMemFile  string
+	ProfileTime     int
 }
 
 // NewConfig создает новую конфигурацию с значениями по умолчанию
@@ -41,6 +48,11 @@ func NewConfig() *Config {
 		HTTPTimeout:      30 * time.Second,
 		MaxRetries:       3,
 		RetryBackoffBase: 1 * time.Second,
+		ProfileEnable:    false,
+		ProfileHTTPPort:  6060,
+		ProfileCPUFile:   "",
+		ProfileMemFile:   "",
+		ProfileTime:      30,
 	}
 }
 
@@ -72,6 +84,21 @@ func (c *Config) Load(cmd *cobra.Command) error {
 	if cmd.Flags().Changed("batch-size") {
 		c.BatchSize, _ = cmd.Flags().GetInt("batch-size")
 	}
+	if cmd.Flags().Changed("profile") {
+		c.ProfileEnable, _ = cmd.Flags().GetBool("profile")
+	}
+	if cmd.Flags().Changed("profile-http-port") {
+		c.ProfileHTTPPort, _ = cmd.Flags().GetInt("profile-http-port")
+	}
+	if cmd.Flags().Changed("profile-cpu") {
+		c.ProfileCPUFile, _ = cmd.Flags().GetString("profile-cpu")
+	}
+	if cmd.Flags().Changed("profile-mem") {
+		c.ProfileMemFile, _ = cmd.Flags().GetString("profile-mem")
+	}
+	if cmd.Flags().Changed("profile-time") {
+		c.ProfileTime, _ = cmd.Flags().GetInt("profile-time")
+	}
 
 	return c.Validate()
 }
@@ -101,6 +128,27 @@ func (c *Config) loadFromEnv() {
 	if batchSizeStr := os.Getenv("BATCH_SIZE"); batchSizeStr != "" {
 		if batchSize, err := strconv.Atoi(batchSizeStr); err == nil {
 			c.BatchSize = batchSize
+		}
+	}
+	if profileStr := os.Getenv("PROFILE_ENABLE"); profileStr != "" {
+		if profile, err := strconv.ParseBool(profileStr); err == nil {
+			c.ProfileEnable = profile
+		}
+	}
+	if profilePortStr := os.Getenv("PROFILE_HTTP_PORT"); profilePortStr != "" {
+		if port, err := strconv.Atoi(profilePortStr); err == nil {
+			c.ProfileHTTPPort = port
+		}
+	}
+	if cpuFile := os.Getenv("PROFILE_CPU_FILE"); cpuFile != "" {
+		c.ProfileCPUFile = cpuFile
+	}
+	if memFile := os.Getenv("PROFILE_MEM_FILE"); memFile != "" {
+		c.ProfileMemFile = memFile
+	}
+	if profileTimeStr := os.Getenv("PROFILE_TIME"); profileTimeStr != "" {
+		if profileTime, err := strconv.Atoi(profileTimeStr); err == nil {
+			c.ProfileTime = profileTime
 		}
 	}
 }
@@ -137,6 +185,16 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid log level: %s", c.LogLevel)
 	}
 
+	// Валидация профилирования
+	if c.ProfileEnable {
+		if c.ProfileHTTPPort <= 0 || c.ProfileHTTPPort > 65535 {
+			return fmt.Errorf("invalid profile HTTP port: %d", c.ProfileHTTPPort)
+		}
+		if c.ProfileTime <= 0 {
+			return fmt.Errorf("profile time must be positive")
+		}
+	}
+
 	return nil
 }
 
@@ -149,4 +207,11 @@ func AddFlags(cmd *cobra.Command) {
 	cmd.Flags().Int("interval", 10, "Collection interval in seconds")
 	cmd.Flags().String("log-level", "info", "Log level (debug, info, warn, error)")
 	cmd.Flags().Int("batch-size", 50, "Batch size for sending metrics")
+
+	// Флаги профилирования
+	cmd.Flags().Bool("profile", false, "Enable profiling")
+	cmd.Flags().Int("profile-http-port", 6060, "HTTP port for pprof endpoints")
+	cmd.Flags().String("profile-cpu", "", "CPU profile output file")
+	cmd.Flags().String("profile-mem", "", "Memory profile output file")
+	cmd.Flags().Int("profile-time", 30, "CPU profile duration in seconds")
 }

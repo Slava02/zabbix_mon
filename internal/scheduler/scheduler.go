@@ -7,7 +7,8 @@ import (
 
 	"zabbix_mon/internal/collector"
 	"zabbix_mon/internal/config"
-	"zabbix_mon/internal/zabbix"
+	"zabbix_mon/pkg/profiler"
+	"zabbix_mon/pkg/zabbix"
 
 	"go.uber.org/zap"
 )
@@ -18,9 +19,13 @@ type Scheduler struct {
 	collector *collector.Collector
 	zabbix    *zabbix.Client
 	logger    *zap.Logger
+	profiler  *profiler.Profiler
 
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	// Статистика для профилирования
+	cycleCount int
 }
 
 // New создает новый планировщик
@@ -35,6 +40,11 @@ func New(cfg *config.Config, logger *zap.Logger) *Scheduler {
 		ctx:       ctx,
 		cancel:    cancel,
 	}
+}
+
+// SetProfiler устанавливает профайлер для периодического логирования статистик
+func (s *Scheduler) SetProfiler(p *profiler.Profiler) {
+	s.profiler = p
 }
 
 // Start запускает планировщик
@@ -87,6 +97,7 @@ func (s *Scheduler) monitoringLoop() {
 
 // collectAndSend собирает метрики и отправляет их в Zabbix
 func (s *Scheduler) collectAndSend() {
+	s.cycleCount++
 	start := time.Now()
 
 	// Создаем контекст с таймаутом для операций
@@ -116,7 +127,13 @@ func (s *Scheduler) collectAndSend() {
 		zap.Duration("collect_time", collectDuration),
 		zap.Duration("send_time", sendDuration),
 		zap.Duration("total_time", totalDuration),
-		zap.Time("timestamp", metrics.Timestamp))
+		zap.Time("timestamp", metrics.Timestamp),
+		zap.Int("cycle", s.cycleCount))
+
+	// Логируем статистику памяти каждые 10 циклов
+	if s.profiler != nil && s.cycleCount%10 == 0 {
+		s.profiler.LogMemStats()
+	}
 }
 
 // sendMetricsWithRetry отправляет метрики с повторными попытками
