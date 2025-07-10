@@ -1,0 +1,124 @@
+version: '3.8'
+
+services:
+  # База данных для Zabbix
+  zabbix-db:
+    image: postgres:15-alpine
+    container_name: zabbix-postgres
+    environment:
+      POSTGRES_USER: zabbix
+      POSTGRES_PASSWORD: zabbix_password
+      POSTGRES_DB: zabbix
+    volumes:
+      - zabbix-db-data:/var/lib/postgresql/data
+    networks:
+      - zabbix-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zabbix -d zabbix"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Zabbix Server
+  zabbix-server:
+    image: zabbix/zabbix-server-pgsql:6.0-ubuntu-latest
+    container_name: zabbix-server
+    environment:
+      DB_SERVER_HOST: zabbix-db
+      POSTGRES_USER: zabbix
+      POSTGRES_PASSWORD: zabbix_password
+      POSTGRES_DB: zabbix
+      ZBX_HISTORYSTORAGEURLHISTORY: ""
+      ZBX_HISTORYSTORAGEURLTTRENDS: ""
+      ZBX_DEBUGLEVEL: 3
+      ZBX_TIMEOUT: 30
+    volumes:
+      - zabbix-server-data:/var/lib/zabbix
+    ports:
+      - "10051:10051"  # Zabbix trapper
+    networks:
+      - zabbix-net
+    depends_on:
+      zabbix-db:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "zabbix_server", "-R", "config_cache_reload"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Zabbix Web Interface
+  zabbix-web:
+    image: zabbix/zabbix-web-nginx-pgsql:6.0-ubuntu-latest
+    container_name: zabbix-web
+    environment:
+      ZBX_SERVER_HOST: zabbix-server
+      ZBX_SERVER_PORT: 10051
+      DB_SERVER_HOST: zabbix-db
+      POSTGRES_USER: zabbix
+      POSTGRES_PASSWORD: zabbix_password
+      POSTGRES_DB: zabbix
+      PHP_TZ: Europe/Moscow
+    ports:
+      - "8080:8080"  # Web interface
+    networks:
+      - zabbix-net
+    depends_on:
+      - zabbix-server
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Zabbix Agent (для демонстрации)
+  zabbix-agent:
+    image: zabbix/zabbix-agent:6.0-ubuntu-latest
+    container_name: zabbix-agent
+    environment:
+      ZBX_HOSTNAME: "zabbix-agent"
+      ZBX_SERVER_HOST: zabbix-server
+      ZBX_SERVER_PORT: 10051
+      ZBX_PASSIVE_ALLOW: true
+      ZBX_ACTIVE_ALLOW: true
+      ZBX_DEBUGLEVEL: 3
+    networks:
+      - zabbix-net
+    depends_on:
+      - zabbix-server
+    restart: unless-stopped
+
+  # Наша CLI утилита мониторинга
+  monitor-cli:
+    build: .
+    container_name: zabbix-monitor-cli
+    environment:
+      # API URL должен указывать на веб-интерфейс для API вызовов
+      ZABBIX_URL: "http://zabbix-web:8080/api_jsonrpc.php"
+      ZABBIX_USER: "Admin"
+      ZABBIX_PASSWORD: "zabbix"
+      ZABBIX_HOST: "test_host"
+      INTERVAL: "10"
+      LOG_LEVEL: "debug"
+      BATCH_SIZE: "50"
+    networks:
+      - zabbix-net
+    depends_on:
+      - zabbix-web
+    restart: unless-stopped
+    # Для тестирования раскомментируйте следующую строку
+    # profiles:
+    #   - testing
+
+volumes:
+  zabbix-db-data:
+    driver: local
+  zabbix-server-data:
+    driver: local
+
+networks:
+  zabbix-net:
+    driver: bridge 
