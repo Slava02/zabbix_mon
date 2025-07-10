@@ -1,199 +1,170 @@
+// Package implement zabbix sender protocol for send metrics to zabbix.
 package zabbix
 
 import (
-	"bytes"
-	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"time"
-
-	"go.uber.org/zap"
 )
 
-const (
-	// Zabbix Sender протокол
-	senderHeader  = "ZBXD\x01"
-	senderDataLen = 8
-)
-
-// SenderData представляет данные для отправки через Zabbix Sender
-type SenderData struct {
-	Host  string      `json:"host"`
-	Key   string      `json:"key"`
-	Value interface{} `json:"value"`
-	Clock int64       `json:"clock,omitempty"`
+// Metric class.
+type Metric struct {
+	Host  string `json:"host"`
+	Key   string `json:"key"`
+	Value string `json:"value"`
+	Clock int64  `json:"clock"`
 }
 
-// SenderRequest представляет запрос Zabbix Sender
-type SenderRequest struct {
-	Request string       `json:"request"`
-	Data    []SenderData `json:"data"`
-	Clock   int64        `json:"clock,omitempty"`
+// Metric class constructor.
+func NewMetric(host, key, value string, clock ...int64) *Metric {
+	m := &Metric{Host: host, Key: key, Value: value}
+	// use current time, if `clock` is not specified
+	if m.Clock = time.Now().Unix(); len(clock) > 0 {
+		m.Clock = int64(clock[0])
+	}
+	return m
 }
 
-// SenderResponse представляет ответ Zabbix Sender
-type SenderResponse struct {
-	Response string `json:"response"`
-	Info     string `json:"info,omitempty"`
+// Packet class.
+type Packet struct {
+	Request string    `json:"request"`
+	Data    []*Metric `json:"data"`
+	Clock   int64     `json:"clock"`
 }
 
-// Sender реализует Zabbix Sender протокол
+// Packet class cunstructor.
+func NewPacket(data []*Metric, clock ...int64) *Packet {
+	p := &Packet{Request: `sender data`, Data: data}
+	// use current time, if `clock` is not specified
+	if p.Clock = time.Now().Unix(); len(clock) > 0 {
+		p.Clock = int64(clock[0])
+	}
+	return p
+}
+
+// DataLen Packet class method, return 8 bytes with packet length in little endian order.
+func (p *Packet) DataLen() []byte {
+	dataLen := make([]byte, 8)
+	JSONData, _ := json.Marshal(p)
+	binary.LittleEndian.PutUint32(dataLen, uint32(len(JSONData)))
+	return dataLen
+}
+
+// Sender class.
 type Sender struct {
-	serverHost string
-	serverPort int
-	timeout    time.Duration
-	logger     *zap.Logger
+	Host string
+	Port int
 }
 
-// NewSender создает новый Zabbix Sender
-func NewSender(serverHost string, serverPort int, timeout time.Duration, logger *zap.Logger) *Sender {
-	return &Sender{
-		serverHost: serverHost,
-		serverPort: serverPort,
-		timeout:    timeout,
-		logger:     logger,
-	}
+// Sender class constructor.
+func NewSender(host string, port int) *Sender {
+	s := &Sender{Host: host, Port: port}
+	return s
 }
 
-// SendData отправляет данные через Zabbix Sender протокол
-func (s *Sender) SendData(ctx context.Context, data []SenderData) error {
-	if len(data) == 0 {
-		return nil
-	}
+// Method Sender class, return zabbix header.
+func (s *Sender) getHeader() []byte {
+	return []byte("ZBXD\x01")
+}
 
-	s.logger.Debug("Sending data via Zabbix Sender",
-		zap.String("host", s.serverHost),
-		zap.Int("port", s.serverPort),
-		zap.Int("items", len(data)))
+// Method Sender class, resolve uri by name:port.
+func (s *Sender) getTCPAddr() (iaddr *net.TCPAddr, err error) {
+	// format: hostname:port
+	addr := fmt.Sprintf("%s:%d", s.Host, s.Port)
 
-	// Создаем запрос
-	request := SenderRequest{
-		Request: "sender data",
-		Data:    data,
-		Clock:   time.Now().Unix(),
-	}
-
-	// Сериализуем в JSON
-	jsonData, err := json.Marshal(request)
+	// Resolve hostname:port to ip:port
+	iaddr, err = net.ResolveTCPAddr("tcp", addr)
 	if err != nil {
-		return fmt.Errorf("failed to marshal sender request: %w", err)
+		err = fmt.Errorf("Connection failed: %s", err.Error())
+		return
 	}
 
-	// Формируем пакет согласно протоколу Zabbix Sender
-	packet := s.buildPacket(jsonData)
-
-	// Отправляем данные
-	response, err := s.sendPacket(ctx, packet)
-	if err != nil {
-		return fmt.Errorf("failed to send packet: %w", err)
-	}
-
-	// Парсим ответ
-	var senderResp SenderResponse
-	if err := json.Unmarshal(response, &senderResp); err != nil {
-		return fmt.Errorf("failed to parse sender response: %w", err)
-	}
-
-	if senderResp.Response != "success" {
-		return fmt.Errorf("zabbix sender error: %s", senderResp.Info)
-	}
-
-	s.logger.Debug("Successfully sent data via Zabbix Sender",
-		zap.String("info", senderResp.Info))
-
-	return nil
+	return
 }
 
-// buildPacket создает пакет согласно протоколу Zabbix Sender
-func (s *Sender) buildPacket(data []byte) []byte {
-	dataLen := uint64(len(data))
+// Method Sender class, make connection to uri.
+func (s *Sender) connect() (conn *net.TCPConn, err error) {
 
-	// Заголовок протокола + длина данных + данные
-	packet := make([]byte, 0, len(senderHeader)+senderDataLen+len(data))
-
-	// Добавляем заголовок
-	packet = append(packet, []byte(senderHeader)...)
-
-	// Добавляем длину данных (little-endian uint64)
-	lenBytes := make([]byte, 8)
-	binary.LittleEndian.PutUint64(lenBytes, dataLen)
-	packet = append(packet, lenBytes...)
-
-	// Добавляем данные
-	packet = append(packet, data...)
-
-	return packet
-}
-
-// sendPacket отправляет пакет на Zabbix сервер и возвращает ответ
-func (s *Sender) sendPacket(ctx context.Context, packet []byte) ([]byte, error) {
-	// Подключаемся к серверу
-	dialer := &net.Dialer{
-		Timeout: s.timeout,
+	type DialResp struct {
+		Conn  *net.TCPConn
+		Error error
 	}
 
-	conn, err := dialer.DialContext(ctx, "tcp", fmt.Sprintf("%s:%d", s.serverHost, s.serverPort))
+	// Open connection to zabbix host
+	iaddr, err := s.getTCPAddr()
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to zabbix server: %w", err)
+		return
+	}
+
+	// dial tcp and handle timeouts
+	ch := make(chan DialResp)
+
+	go func() {
+		conn, err = net.DialTCP("tcp", nil, iaddr)
+		ch <- DialResp{Conn: conn, Error: err}
+	}()
+
+	select {
+	case <-time.After(5 * time.Second):
+		err = fmt.Errorf("Connection Timeout")
+	case resp := <-ch:
+		if resp.Error != nil {
+			err = resp.Error
+			break
+		}
+
+		conn = resp.Conn
+	}
+
+	return
+}
+
+// Method Sender class, read data from connection.
+func (s *Sender) read(conn *net.TCPConn) (res []byte, err error) {
+	res = make([]byte, 1024)
+	res, err = io.ReadAll(conn)
+	if err != nil {
+		err = fmt.Errorf("Error whule receiving the data: %s", err.Error())
+		return
+	}
+
+	return
+}
+
+// Method Sender class, send packet to zabbix.
+func (s *Sender) Send(packet *Packet) (res []byte, err error) {
+	conn, err := s.connect()
+	if err != nil {
+		return
 	}
 	defer conn.Close()
 
-	// Устанавливаем таймаут для операций
-	if err := conn.SetDeadline(time.Now().Add(s.timeout)); err != nil {
-		return nil, fmt.Errorf("failed to set connection deadline: %w", err)
-	}
+	dataPacket, _ := json.Marshal(packet)
 
-	// Отправляем пакет
-	if _, err := conn.Write(packet); err != nil {
-		return nil, fmt.Errorf("failed to write packet: %w", err)
-	}
+	/*
+	   fmt.Printf("HEADER: % x (%s)\n", s.getHeader(), s.getHeader())
+	   fmt.Printf("DATALEN: % x, %d byte\n", packet.DataLen(), len(packet.DataLen()))
+	   fmt.Printf("BODY: %s\n", string(dataPacket))
+	*/
 
-	// Читаем ответ
-	response, err := s.readResponse(conn)
+	// Fill buffer
+	buffer := append(s.getHeader(), packet.DataLen()...)
+	buffer = append(buffer, dataPacket...)
+
+	// Sent packet to zabbix
+	_, err = conn.Write(buffer)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		err = fmt.Errorf("Error while sending the data: %s", err.Error())
+		return
 	}
 
-	return response, nil
-}
+	res, err = s.read(conn)
 
-// readResponse читает ответ от Zabbix сервера
-func (s *Sender) readResponse(conn net.Conn) ([]byte, error) {
-	// Читаем заголовок (5 байт)
-	header := make([]byte, 5)
-	if _, err := conn.Read(header); err != nil {
-		return nil, fmt.Errorf("failed to read header: %w", err)
-	}
-
-	if !bytes.Equal(header, []byte(senderHeader)) {
-		return nil, fmt.Errorf("invalid response header: %v", header)
-	}
-
-	// Читаем длину данных (8 байт)
-	lenBytes := make([]byte, 8)
-	if _, err := conn.Read(lenBytes); err != nil {
-		return nil, fmt.Errorf("failed to read data length: %w", err)
-	}
-
-	dataLen := binary.LittleEndian.Uint64(lenBytes)
-	if dataLen > 1024*1024 { // 1MB максимум
-		return nil, fmt.Errorf("response data too large: %d bytes", dataLen)
-	}
-
-	// Читаем данные
-	data := make([]byte, dataLen)
-	if _, err := conn.Read(data); err != nil {
-		return nil, fmt.Errorf("failed to read response data: %w", err)
-	}
-
-	return data, nil
-}
-
-// ConvertMetricsToSenderData конвертирует метрики в формат Zabbix Sender
-func ConvertMetricsToSenderData(hostName string, items map[string]string, metrics interface{}) []SenderData {
-	// Эта функция будет реализована в client.go
-	// Здесь просто заглушка
-	return nil
+	/*
+	   fmt.Printf("RESPONSE: %s\n", string(res))
+	*/
+	return
 }

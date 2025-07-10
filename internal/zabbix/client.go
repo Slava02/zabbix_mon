@@ -308,7 +308,7 @@ func (c *Client) Initialize(ctx context.Context, hostName string) error {
 		return fmt.Errorf("failed to get zabbix server host: %w", err)
 	}
 
-	c.sender = NewSender(serverHost, 10051, 30*time.Second, c.logger)
+	c.sender = NewSender(serverHost, 10051)
 	c.logger.Info("Initialized Zabbix Sender", zap.String("server", serverHost))
 
 	c.logger.Info("Zabbix client initialized successfully")
@@ -320,39 +320,37 @@ func (c *Client) SendMetrics(ctx context.Context, metrics *collector.MetricSet) 
 	c.logger.Debug("Sending metrics to Zabbix via Sender")
 
 	// Конвертируем метрики в формат Zabbix Sender
-	senderData := c.convertMetricsToSenderData(metrics)
+	senderMetrics := c.convertMetricsToSenderData(metrics)
 
-	if len(senderData) == 0 {
+	if len(senderMetrics) == 0 {
 		c.logger.Warn("No metrics to send")
 		return nil
 	}
 
-	// Отправляем данные через Zabbix Sender
-	if err := c.sender.SendData(ctx, senderData); err != nil {
+	// Создаем пакет и отправляем данные через Zabbix Sender
+	packet := NewPacket(senderMetrics)
+	_, err := c.sender.Send(packet)
+	if err != nil {
 		return fmt.Errorf("failed to send metrics via sender: %w", err)
 	}
 
-	c.logger.Debug("Successfully sent metrics", zap.Int("count", len(senderData)))
+	c.logger.Debug("Successfully sent metrics", zap.Int("count", len(senderMetrics)))
 	return nil
 }
 
 // convertMetricsToSenderData конвертирует собранные метрики в формат Zabbix Sender
-func (c *Client) convertMetricsToSenderData(metrics *collector.MetricSet) []SenderData {
+func (c *Client) convertMetricsToSenderData(metrics *collector.MetricSet) []*Metric {
 	c.itemsMutex.RLock()
 	defer c.itemsMutex.RUnlock()
 
-	var senderData []SenderData
+	var senderMetrics []*Metric
 	timestamp := metrics.Timestamp.Unix()
 
 	// Функция для добавления метрики
 	addMetric := func(key string, value interface{}) {
 		if _, exists := c.items[key]; exists {
-			senderData = append(senderData, SenderData{
-				Host:  c.hostName,
-				Key:   key,
-				Value: value,
-				Clock: timestamp,
-			})
+			metric := NewMetric(c.hostName, key, fmt.Sprintf("%v", value), timestamp)
+			senderMetrics = append(senderMetrics, metric)
 		}
 	}
 
@@ -382,5 +380,5 @@ func (c *Client) convertMetricsToSenderData(metrics *collector.MetricSet) []Send
 	addMetric("net.if.in[all,errors]", metrics.Network.ErrorsIn)
 	addMetric("net.if.out[all,errors]", metrics.Network.ErrorsOut)
 
-	return senderData
+	return senderMetrics
 }
